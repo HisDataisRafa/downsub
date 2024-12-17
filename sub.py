@@ -1,20 +1,33 @@
+# Importaciones principales
 import streamlit as st
 import requests
-from bs4 import BeautifulSoup
-from googleapiclient.discovery import build
-import time
 import pandas as pd
 import base64
+import time
 from datetime import datetime
 
-# Configuración inicial de la página
+# Importamos BeautifulSoup con manejo de errores
+try:
+    from bs4 import BeautifulSoup
+except ImportError:
+    st.error("Error al importar BeautifulSoup4. Por favor, verifica que beautifulsoup4 está instalado correctamente.")
+    st.stop()
+
+# Importamos Google API con manejo de errores
+try:
+    from googleapiclient.discovery import build
+except ImportError:
+    st.error("Error al importar Google API Client. Por favor, verifica la instalación.")
+    st.stop()
+
+# Configuración de la página
 st.set_page_config(
     page_title="Transcriptor de YouTube Shorts",
     page_icon="🎥",
     layout="wide"
 )
 
-# Estilo personalizado
+# Estilo CSS personalizado
 st.markdown("""
     <style>
     .stApp {
@@ -24,12 +37,36 @@ st.markdown("""
     .stButton>button {
         width: 100%;
     }
+    .success-message {
+        padding: 1rem;
+        background-color: #d4edda;
+        border-color: #c3e6cb;
+        color: #155724;
+        border-radius: 0.25rem;
+        margin-bottom: 1rem;
+    }
+    .error-message {
+        padding: 1rem;
+        background-color: #f8d7da;
+        border-color: #f5c6cb;
+        color: #721c24;
+        border-radius: 0.25rem;
+        margin-bottom: 1rem;
+    }
     </style>
 """, unsafe_allow_html=True)
 
+@st.cache_data(ttl=3600)  # Caché por 1 hora
 def obtener_shorts_del_canal(api_key, channel_id):
     """
-    Obtiene la lista de Shorts de un canal de YouTube.
+    Obtiene la lista de Shorts de un canal de YouTube utilizando la API oficial.
+    
+    Parámetros:
+        api_key (str): Clave de API de YouTube
+        channel_id (str): ID del canal de YouTube
+    
+    Retorna:
+        list: Lista de diccionarios con información de los Shorts
     """
     try:
         youtube = build('youtube', 'v3', developerKey=api_key)
@@ -42,11 +79,13 @@ def obtener_shorts_del_canal(api_key, channel_id):
             type="video"
         )
         
-        while request and len(shorts_info) < 50:  # Límite de 50 shorts
+        while request and len(shorts_info) < 50:
             response = request.execute()
             
             for item in response['items']:
                 video_id = item['id']['videoId']
+                
+                # Obtener detalles del video para verificar duración
                 video_response = youtube.videos().list(
                     part='contentDetails,statistics',
                     id=video_id
@@ -69,21 +108,36 @@ def obtener_shorts_del_canal(api_key, channel_id):
         st.error(f"Error al obtener los Shorts: {str(e)}")
         return []
 
+@st.cache_data(ttl=600)  # Caché por 10 minutos
 def generar_transcripcion(url):
     """
-    Genera la transcripción de un Short usando Downsub.
+    Genera la transcripción de un Short utilizando Downsub.
+    
+    Parámetros:
+        url (str): URL del Short de YouTube
+    
+    Retorna:
+        str: Texto de la transcripción o None si hay error
     """
     try:
         session = requests.Session()
         
-        # Primera solicitud para obtener el token CSRF
+        # Obtener el token CSRF
         response = session.get('https://downsub.com/')
-        soup = BeautifulSoup(response.text, 'html.parser')
-        csrf_token = soup.find('input', {'name': '_token'})['value']
+        if not response.ok:
+            st.warning(f"Error al conectar con Downsub: {response.status_code}")
+            return None
+            
+        soup = BeautifulSoup(response.text, 'lxml')  # Usamos lxml como parser
+        csrf_token = soup.find('input', {'name': '_token'})
         
+        if not csrf_token or 'value' not in csrf_token.attrs:
+            st.warning("No se pudo obtener el token CSRF")
+            return None
+            
         # Solicitar la transcripción
         data = {
-            '_token': csrf_token,
+            '_token': csrf_token['value'],
             'url': url,
             'type': 'auto'
         }
@@ -95,7 +149,8 @@ def generar_transcripcion(url):
                 transcript_url = json_data['data'][0].get('url')
                 if transcript_url:
                     transcript_response = session.get(transcript_url)
-                    return transcript_response.text
+                    if transcript_response.ok:
+                        return transcript_response.text.strip()
         
         return None
     except Exception as e:
@@ -104,7 +159,7 @@ def generar_transcripcion(url):
 
 def get_download_link(df):
     """
-    Crea un enlace de descarga para el DataFrame.
+    Crea un enlace de descarga para el DataFrame en formato CSV.
     """
     csv = df.to_csv(index=False)
     b64 = base64.b64encode(csv.encode()).decode()
@@ -112,29 +167,49 @@ def get_download_link(df):
     return f'<a href="data:file/csv;base64,{b64}" download="transcripciones_{fecha}.csv">📥 Descargar transcripciones (CSV)</a>'
 
 def main():
+    """
+    Función principal que maneja la interfaz de usuario y el flujo de la aplicación.
+    """
     st.title("🎥 Transcriptor de YouTube Shorts")
     
     st.markdown("""
-    Esta aplicación te permite generar transcripciones automáticas para los Shorts de un canal de YouTube.
-    
     ### 📝 Instrucciones:
-    1. Ingresa tu API Key de YouTube
-    2. Ingresa el ID del canal
-    3. Selecciona cuántos Shorts quieres procesar
+    1. Obtén tu API Key en [Google Cloud Console](https://console.cloud.google.com)
+    2. Activa YouTube Data API v3 en tu proyecto
+    3. Copia el ID del canal de YouTube (está en la URL del canal)
+    4. Ingresa los datos abajo y haz clic en "Generar Transcripciones"
     """)
     
     # Formulario de entrada
     with st.form("input_form"):
         col1, col2 = st.columns(2)
         with col1:
-            api_key = st.text_input("API Key de YouTube", type="password", help="Obtén tu API Key en Google Cloud Console")
+            api_key = st.text_input(
+                "API Key de YouTube",
+                type="password",
+                help="Tu clave de API de Google Cloud"
+            )
         with col2:
-            channel_id = st.text_input("ID del Canal", help="El ID que aparece en la URL del canal")
+            channel_id = st.text_input(
+                "ID del Canal",
+                help="El ID que aparece en la URL del canal"
+            )
         
-        max_shorts = st.slider("Número de Shorts a procesar", 1, 50, 10)
+        max_shorts = st.slider(
+            "Número de Shorts a procesar",
+            min_value=1,
+            max_value=50,
+            value=10,
+            help="Selecciona cuántos Shorts quieres procesar"
+        )
+        
         submitted = st.form_submit_button("🚀 Generar Transcripciones")
     
-    if submitted and api_key and channel_id:
+    if submitted:
+        if not api_key or not channel_id:
+            st.error("❌ Por favor, ingresa tanto la API Key como el ID del canal.")
+            return
+        
         with st.spinner("🔍 Buscando Shorts en el canal..."):
             shorts_info = obtener_shorts_del_canal(api_key, channel_id)
             
@@ -145,7 +220,6 @@ def main():
             shorts_info = shorts_info[:max_shorts]
             results_df = pd.DataFrame(columns=['Video ID', 'Título', 'URL', 'Transcripción'])
             
-            # Barra de progreso
             progress_bar = st.progress(0)
             status_text = st.empty()
             
@@ -158,12 +232,12 @@ def main():
                     'Video ID': short['video_id'],
                     'Título': short['title'],
                     'URL': short['url'],
-                    'Transcripción': transcript if transcript else 'Error al generar transcripción'
+                    'Transcripción': transcript if transcript else 'No se pudo generar la transcripción'
                 }])
                 
                 results_df = pd.concat([results_df, new_row], ignore_index=True)
                 progress_bar.progress((i + 1) / len(shorts_info))
-                time.sleep(1)  # Pausa para evitar sobrecarga
+                time.sleep(1)
             
             st.success("✅ ¡Proceso completado!")
             
