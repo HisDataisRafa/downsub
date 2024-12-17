@@ -8,6 +8,22 @@ import json
 import html
 from urllib.parse import urlencode
 
+# Importación de Google API con manejo de errores específicos
+try:
+    from googleapiclient.discovery import build
+    from googleapiclient.errors import HttpError
+    GOOGLE_API_AVAILABLE = True
+except ImportError as e:
+    GOOGLE_API_AVAILABLE = False
+    st.error("""
+    No se pudo importar la biblioteca de Google API. 
+    Error específico: {}
+    
+    Por favor, verifica que el archivo requirements.txt contiene:
+    google-api-python-client==2.108.0
+    """.format(str(e)))
+    st.stop()
+
 # Configuración de la página
 st.set_page_config(
     page_title="Transcriptor de YouTube Shorts",
@@ -15,24 +31,19 @@ st.set_page_config(
     layout="wide"
 )
 
-# Estilo CSS personalizado
-st.markdown("""
-    <style>
-    .stApp {
-        max-width: 1200px;
-        margin: 0 auto;
-    }
-    .stButton>button {
-        width: 100%;
-    }
-    </style>
-""", unsafe_allow_html=True)
+# Resto del código igual que antes...
+[... código previo sin cambios hasta la función obtener_shorts_del_canal ...]
 
 @st.cache_data(ttl=3600)
 def obtener_shorts_del_canal(api_key, channel_id):
     """
     Obtiene la lista de Shorts de un canal de YouTube utilizando la API oficial.
+    Incluye manejo de errores mejorado para problemas comunes de API.
     """
+    if not GOOGLE_API_AVAILABLE:
+        st.error("La API de Google no está disponible. Por favor, verifica la instalación.")
+        return []
+        
     try:
         youtube = build('youtube', 'v3', developerKey=api_key)
         shorts_info = []
@@ -45,31 +56,52 @@ def obtener_shorts_del_canal(api_key, channel_id):
         )
         
         while request and len(shorts_info) < 50:
-            response = request.execute()
-            
-            for item in response['items']:
-                video_id = item['id']['videoId']
-                video_response = youtube.videos().list(
-                    part='contentDetails,statistics',
-                    id=video_id
-                ).execute()
+            try:
+                response = request.execute()
                 
-                if 'items' in video_response:
-                    duration = video_response['items'][0]['contentDetails']['duration']
-                    if 'M' not in duration or int(duration.split('M')[0].replace('PT', '')) < 1:
-                        shorts_info.append({
-                            'video_id': video_id,
-                            'title': item['snippet']['title'],
-                            'url': f'https://www.youtube.com/shorts/{video_id}'
-                        })
-            
-            request = youtube.search().list_next(request, response)
+                # Verificar si hay error en la respuesta
+                if 'error' in response:
+                    error_msg = response['error'].get('message', 'Error desconocido de API')
+                    st.error(f"Error de API de YouTube: {error_msg}")
+                    return []
+                
+                for item in response['items']:
+                    video_id = item['id']['videoId']
+                    try:
+                        video_response = youtube.videos().list(
+                            part='contentDetails,statistics',
+                            id=video_id
+                        ).execute()
+                        
+                        if 'items' in video_response and video_response['items']:
+                            duration = video_response['items'][0]['contentDetails']['duration']
+                            # Verificar si es un Short (menos de 1 minuto)
+                            if 'M' not in duration or int(duration.split('M')[0].replace('PT', '')) < 1:
+                                shorts_info.append({
+                                    'video_id': video_id,
+                                    'title': item['snippet']['title'],
+                                    'url': f'https://www.youtube.com/shorts/{video_id}'
+                                })
+                    except HttpError as e:
+                        st.warning(f"No se pudo obtener información del video {video_id}: {str(e)}")
+                        continue
+                
+                request = youtube.search().list_next(request, response)
+                
+            except HttpError as e:
+                if 'quota' in str(e).lower():
+                    st.error("Se ha excedido la cuota de la API de YouTube. Por favor, inténtalo más tarde.")
+                elif 'invalid' in str(e).lower():
+                    st.error("La API Key proporcionada no es válida o ha expirado.")
+                else:
+                    st.error(f"Error al comunicarse con la API de YouTube: {str(e)}")
+                return []
         
         return shorts_info
+        
     except Exception as e:
-        st.error(f"Error al obtener los Shorts: {str(e)}")
+        st.error(f"Error inesperado al obtener los Shorts: {str(e)}")
         return []
-
 @st.cache_data(ttl=600)
 def generar_transcripcion(url):
     """
