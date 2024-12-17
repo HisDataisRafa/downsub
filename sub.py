@@ -7,54 +7,24 @@ from datetime import datetime
 import json
 import html
 from urllib.parse import urlencode
-import os
-import sys
 
-# Configuración inicial de la página
+# Configuración inicial de la página de Streamlit
 st.set_page_config(
     page_title="Transcriptor de YouTube Shorts",
     page_icon="🎥",
     layout="wide"
 )
 
-# Instalación dinámica de dependencias si es necesario
-def check_and_install_dependencies():
-    try:
-        import pkg_resources
-        
-        required = {
-            'google-api-python-client': '2.108.0',
-            'google-auth': '2.25.2',
-            'google-auth-httplib2': '0.1.1',
-            'google-auth-oauthlib': '1.1.0'
-        }
-        
-        installed = {pkg.key: pkg.version for pkg in pkg_resources.working_set}
-        missing = [f"{pkg}=={ver}" for pkg, ver in required.items() if pkg not in installed]
-        
-        if missing:
-            st.warning("Instalando dependencias necesarias...")
-            os.system(f"pip install {' '.join(missing)}")
-            st.experimental_rerun()
-            
-    except Exception as e:
-        st.error(f"Error al verificar dependencias: {str(e)}")
+# Inicialización de la API de YouTube
+import os
+os.environ['GOOGLE_APPLICATION_CREDENTIALS'] = ''
 
-# Verificar dependencias
-check_and_install_dependencies()
-
-# Intentar importar las bibliotecas de Google
 try:
-    import google.auth
     from googleapiclient.discovery import build
-    from googleapiclient.errors import HttpError
     GOOGLE_API_AVAILABLE = True
-except ImportError as e:
-    st.error(f"""
-    Error al importar las bibliotecas de Google API: {str(e)}
-    Por favor, contacta al administrador del sistema.
-    """)
+except ImportError:
     GOOGLE_API_AVAILABLE = False
+    st.error("No se pudo inicializar la API de YouTube. Por favor, verifica las dependencias.")
 
 # Estilo CSS personalizado
 st.markdown("""
@@ -69,19 +39,20 @@ st.markdown("""
     </style>
 """, unsafe_allow_html=True)
 
-@st.cache_data(ttl=3600)
 def obtener_shorts_del_canal(api_key, channel_id):
     """
-    Obtiene la lista de Shorts de un canal de YouTube.
+    Obtiene y filtra los Shorts de un canal de YouTube específico.
     """
     if not GOOGLE_API_AVAILABLE:
-        st.error("API de YouTube no disponible")
+        st.error("La API de YouTube no está disponible.")
         return []
         
     try:
+        # Inicializamos el servicio de YouTube con la API key proporcionada
         youtube = build('youtube', 'v3', developerKey=api_key)
         shorts_info = []
         
+        # Realizamos la búsqueda inicial de videos en el canal
         request = youtube.search().list(
             part="id,snippet",
             channelId=channel_id,
@@ -90,56 +61,49 @@ def obtener_shorts_del_canal(api_key, channel_id):
         )
         
         while request and len(shorts_info) < 50:
-            try:
-                response = request.execute()
+            response = request.execute()
+            
+            # Procesamos cada video encontrado
+            for item in response['items']:
+                video_id = item['id']['videoId']
                 
-                for item in response['items']:
-                    video_id = item['id']['videoId']
-                    video_response = youtube.videos().list(
-                        part='contentDetails,statistics',
-                        id=video_id
-                    ).execute()
-                    
-                    if 'items' in video_response and video_response['items']:
-                        duration = video_response['items'][0]['contentDetails']['duration']
-                        if 'M' not in duration or int(duration.split('M')[0].replace('PT', '')) < 1:
-                            shorts_info.append({
-                                'video_id': video_id,
-                                'title': item['snippet']['title'],
-                                'url': f'https://www.youtube.com/shorts/{video_id}'
-                            })
+                # Obtenemos detalles adicionales del video para verificar si es un Short
+                video_response = youtube.videos().list(
+                    part='contentDetails',
+                    id=video_id
+                ).execute()
                 
-                request = youtube.search().list_next(request, response)
-                
-            except HttpError as e:
-                error_msg = str(e)
-                if 'quotaExceeded' in error_msg:
-                    st.error("Cuota de API excedida. Inténtalo mañana.")
-                elif 'invalid' in error_msg.lower():
-                    st.error("API Key inválida.")
-                else:
-                    st.error(f"Error de API: {error_msg}")
-                return []
+                if 'items' in video_response and video_response['items']:
+                    duration = video_response['items'][0]['contentDetails']['duration']
+                    # Verificamos si es un Short (duración menor a 1 minuto)
+                    if 'M' not in duration or int(duration.split('M')[0].replace('PT', '')) < 1:
+                        shorts_info.append({
+                            'video_id': video_id,
+                            'title': item['snippet']['title'],
+                            'url': f'https://www.youtube.com/shorts/{video_id}'
+                        })
+            
+            request = youtube.search().list_next(request, response)
         
         return shorts_info
         
     except Exception as e:
-        st.error(f"Error al obtener Shorts: {str(e)}")
+        st.error(f"Error al obtener los Shorts: {str(e)}")
         return []
 
-@st.cache_data(ttl=600)
 def generar_transcripcion(url):
     """
-    Genera la transcripción de un Short usando Downsub.
+    Genera la transcripción de un Short de YouTube usando Downsub.
     """
     try:
         session = requests.Session()
         
-        # Obtener token CSRF
+        # Obtener página inicial y token CSRF
         response = session.get('https://downsub.com/')
         if not response.ok:
             return None
         
+        # Extraer token CSRF
         content = response.text
         token_start = content.find('name="_token" value="') + 20
         token_end = content.find('"', token_start)
@@ -147,8 +111,8 @@ def generar_transcripcion(url):
         
         if not csrf_token:
             return None
-            
-        # Solicitar transcripción
+        
+        # Configurar la solicitud para obtener la transcripción
         headers = {
             'Content-Type': 'application/x-www-form-urlencoded',
             'X-Requested-With': 'XMLHttpRequest'
@@ -160,6 +124,7 @@ def generar_transcripcion(url):
             'type': 'auto'
         }
         
+        # Solicitar la transcripción
         response = session.post(
             'https://downsub.com/api/extract',
             data=data,
@@ -171,6 +136,7 @@ def generar_transcripcion(url):
             if json_data.get('data') and json_data['data']:
                 transcript_url = json_data['data'][0].get('url')
                 if transcript_url:
+                    # Descargar y procesar la transcripción
                     transcript_response = session.get(transcript_url)
                     if transcript_response.ok:
                         text = transcript_response.text
@@ -179,12 +145,12 @@ def generar_transcripcion(url):
         
         return None
     except Exception as e:
-        st.error(f"Error en transcripción: {str(e)}")
+        st.error(f"Error al generar la transcripción: {str(e)}")
         return None
 
 def get_download_link(df):
     """
-    Crea enlace de descarga para el DataFrame.
+    Crea un enlace para descargar los resultados en formato CSV.
     """
     csv = df.to_csv(index=False)
     b64 = base64.b64encode(csv.encode()).decode()
@@ -192,16 +158,23 @@ def get_download_link(df):
     return f'<a href="data:file/csv;base64,{b64}" download="transcripciones_{fecha}.csv">📥 Descargar transcripciones (CSV)</a>'
 
 def main():
+    """
+    Función principal que maneja la interfaz de usuario y el flujo de la aplicación.
+    """
     st.title("🎥 Transcriptor de YouTube Shorts")
     
+    # Mostrar instrucciones de uso
     st.markdown("""
+    Esta aplicación genera transcripciones automáticas para los Shorts de un canal de YouTube.
+    
     ### 📝 Instrucciones:
     1. Obtén tu API Key en la [Google Cloud Console](https://console.cloud.google.com)
-    2. Habilita YouTube Data API v3 en tu proyecto
-    3. Ingresa el ID del canal de YouTube
-    4. Selecciona el número de Shorts a procesar
+    2. Activa YouTube Data API v3 en tu proyecto
+    3. Ingresa el ID del canal (lo encuentras en la URL del canal)
+    4. Selecciona cuántos Shorts quieres procesar
     """)
     
+    # Formulario para ingresar datos
     with st.form("input_form"):
         col1, col2 = st.columns(2)
         with col1:
@@ -213,11 +186,11 @@ def main():
         with col2:
             channel_id = st.text_input(
                 "ID del Canal",
-                help="ID del canal de YouTube"
+                help="El ID que aparece en la URL del canal"
             )
         
         max_shorts = st.slider(
-            "Número de Shorts",
+            "Número de Shorts a procesar",
             min_value=1,
             max_value=50,
             value=10
@@ -227,7 +200,7 @@ def main():
     
     if submitted:
         if not api_key or not channel_id:
-            st.error("❌ Ingresa la API Key y el ID del canal.")
+            st.error("❌ Por favor, ingresa tanto la API Key como el ID del canal.")
             return
         
         with st.spinner("🔍 Buscando Shorts..."):
@@ -237,12 +210,15 @@ def main():
                 st.error("❌ No se encontraron Shorts o hubo un error.")
                 return
             
+            # Limitamos al número seleccionado por el usuario
             shorts_info = shorts_info[:max_shorts]
             results_df = pd.DataFrame(columns=['Video ID', 'Título', 'URL', 'Transcripción'])
             
+            # Configuramos elementos de progreso
             progress_bar = st.progress(0)
             status_text = st.empty()
             
+            # Procesamos cada Short
             for i, short in enumerate(shorts_info):
                 status_text.text(f"⏳ Procesando Short {i+1}/{len(shorts_info)}")
                 
@@ -261,12 +237,14 @@ def main():
             
             st.success("✅ ¡Proceso completado!")
             
+            # Mostramos los resultados
             st.dataframe(
                 results_df,
                 use_container_width=True,
                 hide_index=True
             )
             
+            # Proporcionamos el enlace de descarga
             st.markdown(get_download_link(results_df), unsafe_allow_html=True)
 
 if __name__ == "__main__":
