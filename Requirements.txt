@@ -1,11 +1,10 @@
-# Bibliotecas principales
-streamlit==1.31.0
-pandas==2.1.3
-requests==2.31.0
-
-# Bibliotecas de Google API y sus dependencias
-google-api-python-client==2.108.0
-google-auth-httplib2==0.1.1
-google-auth-oauthlib==1.1.0
-oauth2client==4.1.3
-protobuf==4.24.4
+streamlit>=1.31.0
+pandas>=2.1.3
+requests>=2.31.0
+google-api-python-client>=2.108.0
+google-auth>=2.25.2
+google-auth-httplib2>=0.1.1
+google-auth-oauthlib>=1.1.0
+protobuf>=4.25.1
+httplib2>=0.22.0
+uritemplate>=4.1.1
